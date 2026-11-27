@@ -156,6 +156,7 @@ impl SamplingExecution {
                     | TransportError::Policy(_),
                 )
                 | ApiError::ContextWindowExceeded
+                | ApiError::RequestTooLarge
                 | ApiError::ResponseIncomplete(_)
                 | ApiError::SpendLimitExceeded(_)
                 | ApiError::QuotaExceeded

@@ -24,6 +24,8 @@ pub enum ApiError {
     ResponseIncomplete(Box<ResponseIncompleteError>),
     #[error("context window exceeded")]
     ContextWindowExceeded,
+    #[error("request exceeds the provider's maximum size")]
+    RequestTooLarge,
     #[error("quota exceeded")]
     QuotaExceeded,
     #[error("spend limit exceeded")]
@@ -140,6 +142,10 @@ pub(crate) fn parse_terminal_provider_error(
         ("context_length_exceeded", None | Some(StatusCode::BAD_REQUEST)) => {
             Some(ApiError::ContextWindowExceeded)
         }
+        (
+            "request_too_large",
+            None | Some(StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE),
+        ) => Some(ApiError::RequestTooLarge),
         // A non-streaming 400 already follows the ordinary invalid-request path.
         ("invalid_access_program" | "unsupported_access_program", None) => {
             Some(ApiError::InvalidRequest {

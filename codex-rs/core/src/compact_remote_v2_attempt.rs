@@ -30,6 +30,7 @@ use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
 use codex_history::CodexHarnessMetadata;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseItem;
@@ -194,6 +195,14 @@ pub(super) async fn run_remote_compact_v2_attempt(
             && !compaction_model.starts_with("gpt-5.2-codex"))
         || compaction_model == "gpt-5.4-nano"
         || compaction_model.starts_with("gpt-5.4-nano-");
+    // A rejected sampling request already established that its history is too large.
+    let mut reduced_for_request_size = matches!(
+        compaction_metadata.reason(),
+        CompactionReason::RequestTooLarge
+    );
+    if reduced_for_request_size {
+        strip_encrypted_reasoning(&mut input, &mut prompt_input_metadata);
+    }
     let mut prompt = Arc::new(Prompt {
         input,
         tools: if tools_in_history {
@@ -280,6 +289,18 @@ pub(super) async fn run_remote_compact_v2_attempt(
         );
         let rejected_id = match compaction_output_result {
             Ok(output) => break output,
+            Err(error)
+                if matches!(error.details(), CodexErrorDetails::RequestTooLarge)
+                    && !reduced_for_request_size =>
+            {
+                let input = &mut Arc::make_mut(&mut prompt).input;
+                input.pop(); // Do not include the request-only trigger in the projection.
+                if !strip_encrypted_reasoning(input, &mut prompt_input_metadata) {
+                    return Err(error);
+                }
+                reduced_for_request_size = true;
+                continue;
+            }
             Err(error) => submitted_audio
                 .take()
                 .and_then(|audio| audio.rejected_file_id(error.details()))
@@ -303,6 +324,34 @@ pub(super) async fn run_remote_compact_v2_attempt(
         token_usage,
         owned_client_session,
     })
+}
+
+fn strip_encrypted_reasoning(
+    input: &mut Vec<ResponseItem>,
+    metadata: &mut Vec<Option<CodexHarnessMetadata>>,
+) -> bool {
+    // Only project the compaction request. Keep explicit pins and the prior checkpoint.
+    debug_assert_eq!(input.len(), metadata.len());
+    let original_len = input.len();
+    let keep = input
+        .iter()
+        .zip(metadata.iter())
+        .map(|(item, metadata)| {
+            metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.retain_across_windows == Some(true))
+                || !matches!(
+                    item,
+                    ResponseItem::Reasoning { encrypted_content: Some(content), .. }
+                        if !content.is_empty()
+                )
+        })
+        .collect::<Vec<_>>();
+    let mut keep_items = keep.iter().copied();
+    input.retain(|_| keep_items.next().unwrap_or(true));
+    let mut keep_metadata = keep.into_iter();
+    metadata.retain(|_| keep_metadata.next().unwrap_or(true));
+    input.len() != original_len
 }
 
 // Defer normalization and attribution until the caller releases the session lock.
