@@ -45,6 +45,7 @@ pub(crate) fn record_model_fallback(
     let reason_tag = match reason {
         CompactionReason::UserRequested => "user_requested",
         CompactionReason::ContextLimit => "context_limit",
+        CompactionReason::RequestTooLarge => "request_too_large",
         CompactionReason::ModelDownshift => "model_downshift",
         CompactionReason::CompHashChanged => "comp_hash_changed",
     };

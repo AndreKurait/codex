@@ -147,6 +147,8 @@ pub enum CodexErrorDetails {
         "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
     )]
     ContextWindowExceeded,
+    #[error("request exceeds the provider's maximum size")]
+    RequestTooLarge,
     #[error("no thread with id: {0}")]
     ThreadNotFound(ThreadId),
     #[error("agent thread limit reached")]
@@ -511,6 +513,7 @@ impl CodexErr {
             | CodexErrorDetails::APISpendLimitExceeded(_)
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::RequestTooLarge
             | CodexErrorDetails::InvalidAudioInput { .. }
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
@@ -634,6 +637,7 @@ impl CodexErr {
             | CodexErrorDetails::InternalServerError
             | CodexErrorDetails::InternalAgentDied => CodexErrorInfo::InternalServerError,
             CodexErrorDetails::InvalidAudioInput { .. }
+            | CodexErrorDetails::RequestTooLarge
             | CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,

@@ -1507,6 +1507,152 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     Ok(())
 }
 
+#[test_case(400, true, true; "manual compaction with Bedrock error")]
+#[test_case(413, true, true; "manual compaction with HTTP 413")]
+#[test_case(400, false, true; "automatic compaction after sampling rejection")]
+#[test_case(413, true, false; "reduced request rejected without another retry")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_v2_recovers_from_oversized_reasoning(
+    status: u16,
+    manual: bool,
+    recovery_succeeds: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(amazon_bedrock_test_codex()).await?;
+    let codex = &harness.test().codex;
+    let mut reasoning = responses::ev_reasoning_item("rs_1", &[], &[]);
+    reasoning["item"]["encrypted_content"] = json!(BASE64_STANDARD.encode(vec![7; 64 * 1024]));
+    let rejected = if status == 413 {
+        ResponseTemplate::new(413)
+    } else {
+        ResponseTemplate::new(400).set_body_json(json!({
+            "error": {"code": "request_too_large", "message": "Request exceeds the maximum allowed size"}
+        }))
+    };
+    let mut reply_sequence = vec![
+        responses::sse_response(sse(vec![
+            reasoning,
+            responses::ev_assistant_message("m1", "original reply"),
+            responses::ev_completed("original"),
+        ])),
+        rejected.clone(),
+    ];
+    if recovery_succeeds {
+        reply_sequence.extend([
+            responses::sse_response(sse(vec![
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {"type": "compaction", "encrypted_content": "RECOVERED_CHECKPOINT"}
+                }),
+                responses::ev_completed("compact"),
+            ])),
+            responses::sse_response(sse(vec![
+                responses::ev_assistant_message("m2", "recovered reply"),
+                responses::ev_completed("recovered"),
+            ])),
+        ]);
+    } else {
+        reply_sequence.push(rejected);
+    }
+    let responses_mock = responses::mount_response_sequence(harness.server(), reply_sequence).await;
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "original user message".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(codex).await;
+    codex
+        .inject_response_items(vec![
+            serde_json::from_value(json!({
+                "type": "compaction", "encrypted_content": "PREVIOUS_CHECKPOINT"
+            }))?,
+            serde_json::from_value(json!({
+                "type": "function_call", "call_id": "call_prior", "name": "test_tool",
+                "arguments": "{}"
+            }))?,
+            serde_json::from_value(json!({
+                "type": "function_call_output", "call_id": "call_prior", "output": "tool result"
+            }))?,
+        ])
+        .await?;
+    let resumed = amazon_bedrock_test_codex()
+        .restart(harness.server(), harness.test())
+        .await?;
+    let codex = &resumed.codex;
+
+    if manual {
+        codex.submit(Op::Compact).await?;
+        if !recovery_succeeds {
+            let event = wait_for_event_with_timeout(
+                codex,
+                |event| matches!(event, EventMsg::Error(_)),
+                REMOTE_COMPACT_TURN_COMPLETE_TIMEOUT,
+            )
+            .await;
+            assert!(
+                matches!(event, EventMsg::Error(error) if error.message.contains("maximum size"))
+            );
+        }
+        wait_for_turn_complete(codex).await;
+    }
+    if recovery_succeeds {
+        codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "follow-up user message".into(),
+                text_elements: Vec::new(),
+            }]))
+            .await?;
+        let event = wait_for_event_with_timeout(
+            codex,
+            |event| matches!(event, EventMsg::TurnComplete(_)),
+            REMOTE_COMPACT_TURN_COMPLETE_TIMEOUT,
+        )
+        .await;
+        assert!(matches!(event, EventMsg::TurnComplete(completed)
+            if completed.last_agent_message.as_deref() == Some("recovered reply")));
+    }
+
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), if recovery_succeeds { 4 } else { 3 });
+    assert_eq!(requests[1].inputs_of_type("reasoning").len(), 1);
+    assert_eq!(
+        !requests[1].inputs_of_type("compaction_trigger").is_empty(),
+        manual
+    );
+    let reduced = &requests[2];
+    assert!(reduced.inputs_of_type("reasoning").is_empty());
+    assert_eq!(reduced.inputs_of_type("compaction_trigger").len(), 1);
+    let reduced_body = reduced.body_json().to_string();
+    assert!(reduced_body.contains("original user message"));
+    assert!(reduced_body.contains("original reply"));
+    assert_eq!(
+        reduced.inputs_of_type("compaction")[0]["encrypted_content"],
+        "PREVIOUS_CHECKPOINT"
+    );
+    assert!(reduced.has_function_call("call_prior"));
+    assert_eq!(
+        reduced.function_call_output_text("call_prior").as_deref(),
+        Some("tool result")
+    );
+    if let Some(follow_up) = requests.get(3) {
+        assert_eq!(
+            follow_up.inputs_of_type("compaction")[0]["encrypted_content"],
+            "RECOVERED_CHECKPOINT"
+        );
+        assert_eq!(
+            follow_up
+                .body_json()
+                .to_string()
+                .matches("follow-up user message")
+                .count(),
+            1
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_v2_retries_failures_with_stream_retry_budget() -> Result<()> {
     skip_if_no_network!(Ok(()));

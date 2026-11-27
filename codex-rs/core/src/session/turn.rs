@@ -553,6 +553,7 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
+    let mut oversized_request_compacted = false;
     let mut unfinished_plan_id = None;
     loop {
         // Note that pending_input would be something like a message the user
@@ -973,6 +974,33 @@ pub(crate) async fn run_turn(
                     }
                     break;
                 }
+                continue;
+            }
+            Err(err)
+                if matches!(err.details(), CodexErrorDetails::RequestTooLarge)
+                    && !oversized_request_compacted
+                    && auto_summarization_enabled
+                    && !crate::guardian::is_basic_session_source(&turn_context.session_source)
+                    && matches!(
+                        turn_context.provider.capabilities().remote_compaction,
+                        RemoteCompactionSupport::V2
+                    ) =>
+            {
+                oversized_request_compacted = true;
+                if !run_auto_compact(
+                    &sess,
+                    Arc::clone(&step_context),
+                    Arc::clone(&step_context),
+                    &mut client_session,
+                    CompactionReason::RequestTooLarge,
+                    CompactionPhase::MidTurn,
+                    /*candidate*/ None,
+                )
+                .await?
+                {
+                    return Err(err);
+                }
+                can_drain_pending_input = false;
                 continue;
             }
             Err(err)

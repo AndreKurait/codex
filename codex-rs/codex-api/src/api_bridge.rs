@@ -34,6 +34,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         | ApiError::ContentFilter
         | ApiError::ResponseIncomplete(_)
         | ApiError::ContextWindowExceeded
+        | ApiError::RequestTooLarge
         | ApiError::SpendLimitExceeded(_)
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
@@ -61,6 +62,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
 fn map_api_error_details(err: ApiError) -> CodexErr {
     match err {
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+        ApiError::RequestTooLarge => CodexErrorDetails::RequestTooLarge.into(),
         ApiError::SpendLimitExceeded(scope) => {
             CodexErrorDetails::APISpendLimitExceeded(scope).into()
         }
@@ -139,6 +141,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
                 body,
                 ..
             } => {
+                if status == http::StatusCode::PAYLOAD_TOO_LARGE {
+                    return CodexErrorDetails::RequestTooLarge.into();
+                }
                 let body_text = body.unwrap_or_default();
                 let parsed_body = serde_json::from_str::<Value>(&body_text).ok();
                 let provider_error = parsed_body.as_ref().and_then(|body| body.get("error"));
